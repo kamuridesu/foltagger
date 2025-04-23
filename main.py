@@ -2,18 +2,37 @@ import asyncio
 import sys
 from pathlib import Path
 
+from aiohttp.client_exceptions import ClientResponseError
+
 from src.foltagger.folder import load_json
+from src.foltagger.state import get_state_tags, save_state
 from src.foltagger.tagger import is_tagger_alive, tagger
 
 TASKS: set[asyncio.Task] = set()
-SEM = asyncio.Semaphore(100)
+SEM = asyncio.Semaphore(20)
+
+
+async def fetch_server_response(image: bytes):
+    for i in range(5):
+        try:
+            return await tagger(image)
+        except ClientResponseError:
+            print(f"Failed to load image, retrying {i+1}/5")
+            await asyncio.sleep(5)
+    return None
 
 
 async def start(image: Path, tags: list[str]):
     base_path = image.parent.absolute()
     async with SEM:
         print(f"Cheking image {str(image)}", flush=True)
-        remote_tags = await tagger(image.read_bytes())
+        remote_tags = get_state_tags(str(image.absolute()))
+        if remote_tags is None:
+            remote_tags = await fetch_server_response(image.read_bytes())
+        if remote_tags is None:
+            print(f"Could not fetch tags for image {str(image.name)}")
+            return
+        save_state(str(image.absolute()), remote_tags)
         print(f"Returned tags for {str(image)}: {remote_tags}", flush=True)
         if not tags:
             return
@@ -24,7 +43,10 @@ async def start(image: Path, tags: list[str]):
                 if tag in otag:
                     print(f"Found compatible tags to {str(image)}: {tag}")
                     (base_path / tag).mkdir(exist_ok=True)
-                    (image.absolute()).replace(base_path / tag / image.name)
+                    try:
+                        (image.absolute()).replace(base_path / tag / image.name)
+                    except FileNotFoundError as e:
+                        print(f"Could not move {image.absolute()}, err is {e}")
 
 
 async def main():
